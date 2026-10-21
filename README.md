@@ -170,7 +170,7 @@ The AI will handle opening, analyzing, saving, and switching targets completely 
 ## Details & Edge Cases
 
 - **Autonomous Mode (`-A`)**: By default, `ida-auto-mcp` passes `-A` so IDA won't halt on prompt dialogs (like PDB download confirmations or compiler signature choices).
-- **Existing Databases**: If a `.i64` file exists alongside the binary, `ida-auto-mcp` opens that directly so you don't waste time re-analyzing already processed files.
+- **Existing Databases & Game Updates**: If a `.i64` file exists, `ida-auto-mcp` checks file modification timestamps (`mtime`). If the binary hasn't changed, it reuses the `.i64` for instant loading. If the binary was updated on disk after the `.i64` was saved (e.g. after a game patch), `ida-auto-mcp` automatically archives the stale database to `<binary>_pre_update_<timestamp>.i64` and generates a fresh database for the updated binary so your analysis is always up to date.
 - **Port Conflict Handling**: When IDA exits, Windows sockets can briefly hold port 13337 in `TIME_WAIT`. `ida-auto-mcp` actively waits for the port to release before spawning the next process so IDA won't mistakenly bump its port to 13338.
 
 ---

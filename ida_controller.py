@@ -17,8 +17,9 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -318,14 +319,26 @@ def close_active_target(save: bool = True, timeout_sec: float = 15.0) -> Dict[st
     }
 
 
-def find_existing_database(file_path: str) -> Optional[str]:
-    """Find an existing .i64 or .idb adjacent to the target file."""
+def find_existing_database(file_path: str) -> Tuple[Optional[str], bool]:
+    """Find an existing .i64 or .idb adjacent to the target file.
+
+    Returns:
+        (database_path, is_stale)
+        is_stale is True if the binary on disk was modified AFTER the database was saved,
+        indicating the binary has been updated (e.g. game patch/update) and the database is outdated.
+    """
     base, _ = os.path.splitext(file_path)
+    binary_mtime = os.path.getmtime(file_path) if os.path.isfile(file_path) else 0
+
     for ext in (".i64", ".idb"):
         candidate = base + ext
         if os.path.isfile(candidate):
-            return candidate
-    return None
+            db_mtime = os.path.getmtime(candidate)
+            # If the binary is strictly newer than the database, the binary was updated
+            is_stale = binary_mtime > db_mtime
+            return candidate, is_stale
+
+    return None, False
 
 
 def open_target(
@@ -335,8 +348,14 @@ def open_target(
     wait_ready: bool = True,
     timeout_sec: float = 180.0,
     force_new_database: bool = False,
+    auto_backup_on_update: bool = True,
 ) -> Dict[str, Any]:
-    """Launch IDA Pro with the specified target file and wait for analysis/MCP readiness."""
+    """Launch IDA Pro with the specified target file and wait for analysis/MCP readiness.
+
+    Automatically handles binary updates:
+    If target_path was modified after its existing .i64 was saved (e.g. after a game update/patch),
+    the stale .i64 is archived to a timestamped backup and a fresh database is created for the updated binary.
+    """
     norm_path = os.path.abspath(os.path.expanduser(os.path.expandvars(target_path)))
     if not os.path.isfile(norm_path):
         return {
@@ -353,13 +372,46 @@ def open_target(
     # 2. Locate IDA executable
     ida_exe = find_ida_executable(gui=gui)
 
-    # 3. Determine target: prefer existing .i64/.idb database if available
+    # 3. Check for existing database and test freshness
+    existing_idb, is_stale = find_existing_database(norm_path)
     launch_target = norm_path
-    if not force_new_database:
-        existing_idb = find_existing_database(norm_path)
-        if existing_idb:
+    archived_backup = None
+
+    if existing_idb and not force_new_database:
+        if is_stale:
+            # Binary on disk is newer than database! Binary was updated (e.g., game patch).
+            logger.warning(
+                "Binary '%s' is newer than existing database '%s'. Binary was updated!",
+                norm_path,
+                existing_idb,
+            )
+            if auto_backup_on_update:
+                base, ext = os.path.splitext(existing_idb)
+                mtime_str = datetime.fromtimestamp(os.path.getmtime(existing_idb)).strftime("%Y%m%d_%H%M%S")
+                archived_backup = f"{base}_pre_update_{mtime_str}{ext}"
+                logger.info("Archiving stale database to '%s'...", archived_backup)
+                try:
+                    shutil.move(existing_idb, archived_backup)
+                except OSError as e:
+                    logger.error("Failed to archive stale database: %s", e)
+
+                # Clean up any lingering partial files (.id0, .id1, .nam, etc.)
+                base_no_ext, _ = os.path.splitext(norm_path)
+                for p_ext in (".id0", ".id1", ".id2", ".nam", ".til"):
+                    p_file = base_no_ext + p_ext
+                    if os.path.isfile(p_file):
+                        try:
+                            os.unlink(p_file)
+                        except OSError:
+                            pass
+
+                force_new_database = True
+                launch_target = norm_path
+            else:
+                launch_target = existing_idb
+        else:
             launch_target = existing_idb
-            logger.info("Reusing existing database: %s", existing_idb)
+            logger.info("Database is fresh, opening existing: %s", existing_idb)
 
     # 4. Construct command line flags
     # -A : autonomous mode (suppresses modal dialogs/prompts)
@@ -385,6 +437,8 @@ def open_target(
             "success": True,
             "pid": proc.pid,
             "target": launch_target,
+            "was_updated": is_stale,
+            "archived_backup": archived_backup,
             "message": "IDA launched (not waiting for analysis ready).",
         }
 
@@ -419,6 +473,13 @@ def open_target(
             "error": f"IDA launched but ida_mcp did not become responsive on port {DEFAULT_PORT} within {timeout_sec}s.",
         }
 
+    status_msg = (
+        f"IDA Pro is open with {os.path.basename(norm_path)}. "
+        f"Auto-analysis is {'complete' if auto_analysis_ready else 'in progress'}."
+    )
+    if is_stale and archived_backup:
+        status_msg += f" (Detected binary update! Previous database was archived to '{os.path.basename(archived_backup)}' and re-analyzed)."
+
     return {
         "success": True,
         "pid": proc.pid,
@@ -429,11 +490,9 @@ def open_target(
         "imagebase": health_info.get("imagebase") if health_info else None,
         "auto_analysis_ready": auto_analysis_ready,
         "hexrays_ready": health_info.get("hexrays_ready") if health_info else False,
-        "message": (
-            f"IDA Pro is open with {os.path.basename(norm_path)}. "
-            f"Auto-analysis is {'complete' if auto_analysis_ready else 'in progress'}. "
-            "You can now use all IDA MCP tools (decompile, list_funcs, survey_binary, etc.)."
-        ),
+        "binary_was_updated": is_stale,
+        "archived_backup": archived_backup,
+        "message": status_msg,
     }
 
 
@@ -473,12 +532,14 @@ def list_candidate_binaries(
         _, ext = os.path.splitext(filepath)
         if ext.lower() in exts:
             sz = os.path.getsize(filepath)
-            has_idb = find_existing_database(filepath) is not None
+            existing_db, is_stale = find_existing_database(filepath)
             matches.append({
                 "path": filepath,
                 "name": os.path.basename(filepath),
                 "size_bytes": sz,
-                "has_existing_database": has_idb,
+                "has_existing_database": existing_db is not None,
+                "database_is_outdated": is_stale,
+                "database_path": existing_db,
             })
 
     if recursive:

@@ -25,7 +25,7 @@ logger = logging.getLogger("ida_auto_mcp")
 
 mcp = MCPServer(
     name="ida-auto-mcp",
-    version="1.0.0",
+    version="1.1.0",
     description="Automate opening, closing, and switching binaries in IDA Pro for unattended static analysis.",
 )
 
@@ -38,12 +38,13 @@ def ida_open(
     wait_ready: bool = True,
     timeout_sec: int = 180,
     force_new_database: bool = False,
+    auto_backup_on_update: bool = True,
 ) -> Dict[str, Any]:
     """Open a binary or database in IDA Pro and wait for auto-analysis and MCP readiness.
 
     If an IDA instance is already open, its database is automatically saved and closed first.
-    Once this tool returns successfully, the target is fully loaded and ready for static analysis
-    using the standard IDA MCP tools (decompile, list_funcs, survey_binary, etc.).
+    If the target binary was updated since its .i64 was saved (e.g. after a game patch),
+    the old database is automatically archived to a timestamped backup and a fresh database is generated.
 
     Args:
         target_path: Absolute or relative path to the binary (.dll, .exe, .so, etc.) or existing IDB (.i64).
@@ -52,6 +53,7 @@ def ida_open(
         wait_ready: If True (default), waits until IDA auto-analysis finishes and the MCP server is responsive.
         timeout_sec: Maximum seconds to wait for IDA auto-analysis and MCP initialization (default 180).
         force_new_database: If True, forces creating a new database even if an existing .i64 is present.
+        auto_backup_on_update: If True (default), automatically archives old .i64 when binary timestamp is newer.
     """
     return open_target(
         target_path=target_path,
@@ -60,6 +62,7 @@ def ida_open(
         wait_ready=wait_ready,
         timeout_sec=float(timeout_sec),
         force_new_database=force_new_database,
+        auto_backup_on_update=auto_backup_on_update,
     )
 
 
@@ -82,9 +85,13 @@ def ida_switch(
     wait_ready: bool = True,
     timeout_sec: int = 180,
     force_new_database: bool = False,
+    auto_backup_on_update: bool = True,
 ) -> Dict[str, Any]:
     """Switch to a different target: automatically saves the current IDA database, closes it,
     and opens the new binary.
+
+    If the new binary was modified after its .i64 was created, it automatically archives the old
+    database and generates a fresh one.
 
     Args:
         target_path: Path to the next binary or database to open.
@@ -93,6 +100,7 @@ def ida_switch(
         wait_ready: If True (default), waits until auto-analysis completes.
         timeout_sec: Maximum seconds to wait.
         force_new_database: If True, ignores existing .i64 database.
+        auto_backup_on_update: If True (default), archives old database if binary was updated.
     """
     return open_target(
         target_path=target_path,
@@ -101,6 +109,7 @@ def ida_switch(
         wait_ready=wait_ready,
         timeout_sec=float(timeout_sec),
         force_new_database=force_new_database,
+        auto_backup_on_update=auto_backup_on_update,
     )
 
 
@@ -124,7 +133,7 @@ def ida_list_targets(
 ) -> Dict[str, Any]:
     """Scan a folder for candidate binary files (e.g. .dll, .exe) to analyze in IDA.
 
-    Shows file sizes and whether an existing .i64 database is already present for each file.
+    Shows file sizes, whether an .i64 database exists, and whether the binary was updated since.
 
     Args:
         directory: Path to the folder containing targets.
