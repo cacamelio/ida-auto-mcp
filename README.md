@@ -40,7 +40,7 @@ When switching binaries, `ida-auto-mcp`:
 
 ## Installation
 
-Requires Python 3.10+ and IDA Pro 9.x (Windows).
+Requires Python 3.11+ and IDA Pro 9.x (Windows).
 
 ```bash
 git clone https://github.com/cacamelio/ida-auto-mcp.git
@@ -121,6 +121,21 @@ Add `ida-auto` under the `"mcp"` key:
 }
 ```
 
+### Cursor (`~/.cursor/mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "ida-auto": {
+      "command": "python",
+      "args": [
+        "C:\\path\\to\\ida-auto-mcp\\server.py"
+      ]
+    }
+  }
+}
+```
+
 ---
 
 ## Available Tools
@@ -170,8 +185,10 @@ The AI will handle opening, analyzing, saving, and switching targets completely 
 ## Details & Edge Cases
 
 - **Autonomous Mode (`-A`)**: By default, `ida-auto-mcp` passes `-A` so IDA won't halt on prompt dialogs (like PDB download confirmations or compiler signature choices).
-- **Existing Databases & Game Updates**: If a `.i64` file exists, `ida-auto-mcp` checks file modification timestamps (`mtime`). If the binary hasn't changed, it reuses the `.i64` for instant loading. If the binary was updated on disk after the `.i64` was saved (e.g. after a game patch), `ida-auto-mcp` automatically archives the stale database to `<binary>_pre_update_<timestamp>.i64` and generates a fresh database for the updated binary so your analysis is always up to date.
-- **Port Conflict Handling**: When IDA exits, Windows sockets can briefly hold port 13337 in `TIME_WAIT`. `ida-auto-mcp` actively waits for the port to release before spawning the next process so IDA won't mistakenly bump its port to 13338.
+- **Existing Databases & Binary Updates**: If a `.i64` or `.idb` file exists, `ida-auto-mcp` checks binary fingerprints (file size, high-resolution modification timestamp, and SHA-256 content hash). If the binary hasn't changed, it reuses the database for instant loading. If the binary was updated on disk after the database was saved, `ida-auto-mcp` automatically archives the database and any loose working files (`.id0`, `.id1`, etc.) to a verified backup in `ida_backups` with metadata sidecars before generating a fresh database.
+- **Automatic 14-Day Backup Retention**: Automatically generated database backups older than 14 days (14 × 24 hours) are cleanly pruned. Original binaries, primary databases, loose recovery files, active files, and foreign files are strictly protected and never deleted.
+- **Process Ownership & Port Conflict Handling**: When multiple IDA instances run or when instances restart, `ida-auto-mcp` uses exact process creation time and verified executable checks to prevent PID reuse issues, waits for ports to release from `TIME_WAIT`, and targets each IDA instance by its actual registered port rather than assuming port 13337.
+- **Cross-Process Synchronization**: Uses in-process reentrant locking paired with an OS-level Windows Named Mutex to ensure target switching and save operations are strictly serialized without races or deadlocks.
 
 ---
 

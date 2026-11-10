@@ -1,15 +1,14 @@
-"""IDA Auto MCP Server
-
-An MCP server designed for OpenCode, Claude Desktop, Cursor, and Antigravity
-to autonomously orchestrate IDA Pro instances, switch between binaries/databases,
-wait for auto-analysis, and cleanly save/close databases.
-"""
-
 from __future__ import annotations
 
 import argparse
 import logging
+import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+if sys.version_info < (3, 11):
+    raise RuntimeError("ida-auto-mcp requires Python 3.11+ (due to MCP SDK dependency requirements).")
 
 from mcp.server.mcpserver import MCPServer
 
@@ -22,6 +21,8 @@ from ida_controller import (
 )
 
 logger = logging.getLogger("ida_auto_mcp")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 
 mcp = MCPServer(
     name="ida-auto-mcp",
@@ -30,7 +31,15 @@ mcp = MCPServer(
 )
 
 
-@mcp.tool()
+def _validate_path(path_str: str) -> str:
+    if not path_str or not isinstance(path_str, str) or not path_str.strip():
+        raise ValueError("Path must be a non-empty string.")
+    cleaned = path_str.strip()
+    norm = os.path.abspath(os.path.expanduser(os.path.expandvars(cleaned)))
+    return norm
+
+
+@mcp.tool(description="Open a binary or database in IDA Pro and wait for auto-analysis and MCP readiness.")
 def ida_open(
     target_path: str,
     gui: bool = True,
@@ -40,44 +49,41 @@ def ida_open(
     force_new_database: bool = False,
     auto_backup_on_update: bool = True,
 ) -> Dict[str, Any]:
-    """Open a binary or database in IDA Pro and wait for auto-analysis and MCP readiness.
-
-    If an IDA instance is already open, its database is automatically saved and closed first.
-    If the target binary was updated since its .i64 was saved (e.g. after a game patch),
-    the old database is automatically archived to a timestamped backup and a fresh database is generated.
-
-    Args:
-        target_path: Absolute or relative path to the binary (.dll, .exe, .so, etc.) or existing IDB (.i64).
-        gui: If True (default), launches ida64.exe. If False, launches headless idat64.exe.
-        autonomous: If True (default), passes -A to suppress interactive popups and modal dialogs.
-        wait_ready: If True (default), waits until IDA auto-analysis finishes and the MCP server is responsive.
-        timeout_sec: Maximum seconds to wait for IDA auto-analysis and MCP initialization (default 180).
-        force_new_database: If True, forces creating a new database even if an existing .i64 is present.
-        auto_backup_on_update: If True (default), automatically archives old .i64 when binary timestamp is newer.
-    """
-    return open_target(
-        target_path=target_path,
-        gui=gui,
-        autonomous=autonomous,
-        wait_ready=wait_ready,
-        timeout_sec=float(timeout_sec),
-        force_new_database=force_new_database,
-        auto_backup_on_update=auto_backup_on_update,
-    )
+    try:
+        norm_path = _validate_path(target_path)
+        valid_timeout = max(1.0, float(timeout_sec))
+        return open_target(
+            target_path=norm_path,
+            gui=bool(gui),
+            autonomous=bool(autonomous),
+            wait_ready=bool(wait_ready),
+            timeout_sec=valid_timeout,
+            force_new_database=bool(force_new_database),
+            auto_backup_on_update=bool(auto_backup_on_update),
+        )
+    except Exception as e:
+        logger.error("ida_open error for '%s': %s", target_path, e)
+        return {
+            "success": False,
+            "state": "startup_failed",
+            "error": str(e),
+        }
 
 
-@mcp.tool()
+@mcp.tool(description="Gracefully save the database and close the currently running IDA Pro instance.")
 def ida_close(save: bool = True, timeout_sec: int = 15) -> Dict[str, Any]:
-    """Gracefully save the database and close the currently running IDA Pro instance.
+    try:
+        valid_timeout = max(1.0, float(timeout_sec))
+        return close_active_target(save=bool(save), timeout_sec=valid_timeout)
+    except Exception as e:
+        logger.error("ida_close error: %s", e)
+        return {
+            "success": False,
+            "error": str(e),
+        }
 
-    Args:
-        save: If True (default), triggers database save (.i64/.idb) before closing.
-        timeout_sec: Maximum seconds to wait for process termination and port release.
-    """
-    return close_active_target(save=save, timeout_sec=float(timeout_sec))
 
-
-@mcp.tool()
+@mcp.tool(description="Switch to a different target: automatically saves the current IDA database, closes it, and opens the new binary.")
 def ida_switch(
     target_path: str,
     gui: bool = True,
@@ -87,64 +93,71 @@ def ida_switch(
     force_new_database: bool = False,
     auto_backup_on_update: bool = True,
 ) -> Dict[str, Any]:
-    """Switch to a different target: automatically saves the current IDA database, closes it,
-    and opens the new binary.
-
-    If the new binary was modified after its .i64 was created, it automatically archives the old
-    database and generates a fresh one.
-
-    Args:
-        target_path: Path to the next binary or database to open.
-        gui: If True (default), runs GUI mode.
-        autonomous: If True (default), passes -A for unattended automation.
-        wait_ready: If True (default), waits until auto-analysis completes.
-        timeout_sec: Maximum seconds to wait.
-        force_new_database: If True, ignores existing .i64 database.
-        auto_backup_on_update: If True (default), archives old database if binary was updated.
-    """
-    return open_target(
-        target_path=target_path,
-        gui=gui,
-        autonomous=autonomous,
-        wait_ready=wait_ready,
-        timeout_sec=float(timeout_sec),
-        force_new_database=force_new_database,
-        auto_backup_on_update=auto_backup_on_update,
-    )
+    try:
+        norm_path = _validate_path(target_path)
+        valid_timeout = max(1.0, float(timeout_sec))
+        return open_target(
+            target_path=norm_path,
+            gui=bool(gui),
+            autonomous=bool(autonomous),
+            wait_ready=bool(wait_ready),
+            timeout_sec=valid_timeout,
+            force_new_database=bool(force_new_database),
+            auto_backup_on_update=bool(auto_backup_on_update),
+        )
+    except Exception as e:
+        logger.error("ida_switch error for '%s': %s", target_path, e)
+        return {
+            "success": False,
+            "state": "startup_failed",
+            "error": str(e),
+        }
 
 
-@mcp.tool()
+@mcp.tool(description="Check the status of IDA Pro, the active target binary, auto-analysis progress, and MCP server health.")
 def ida_status() -> Dict[str, Any]:
-    """Check the status of IDA Pro, the active target binary, auto-analysis progress, and MCP server health."""
-    return get_current_status()
+    try:
+        return get_current_status()
+    except Exception as e:
+        logger.error("ida_status error: %s", e)
+        return {
+            "mcp_server_running": False,
+            "summary": "Error checking status",
+            "error": str(e),
+        }
 
 
-@mcp.tool()
+@mcp.tool(description="Save the currently open IDA database to disk without closing IDA.")
 def ida_save() -> Dict[str, Any]:
-    """Save the currently open IDA database (.i64/.idb) to disk without closing IDA."""
-    return save_active_idb()
+    try:
+        return save_active_idb()
+    except Exception as e:
+        logger.error("ida_save error: %s", e)
+        return {
+            "ok": False,
+            "error": str(e),
+        }
 
 
-@mcp.tool()
+@mcp.tool(description="Scan a folder for candidate binary files to analyze in IDA.")
 def ida_list_targets(
     directory: str,
     extensions: Optional[List[str]] = None,
     recursive: bool = False,
 ) -> Dict[str, Any]:
-    """Scan a folder for candidate binary files (e.g. .dll, .exe) to analyze in IDA.
-
-    Shows file sizes, whether an .i64 database exists, and whether the binary was updated since.
-
-    Args:
-        directory: Path to the folder containing targets.
-        extensions: List of extensions to include (default: [".dll", ".exe", ".sys", ".so", ".bin"]).
-        recursive: If True, recursively scans subdirectories.
-    """
-    return list_candidate_binaries(
-        directory=directory,
-        extensions=extensions,
-        recursive=recursive,
-    )
+    try:
+        norm_dir = _validate_path(directory)
+        return list_candidate_binaries(
+            directory=norm_dir,
+            extensions=extensions,
+            recursive=bool(recursive),
+        )
+    except Exception as e:
+        logger.error("ida_list_targets error for '%s': %s", directory, e)
+        return {
+            "success": False,
+            "error": str(e),
+        }
 
 
 def main():
@@ -167,6 +180,14 @@ def main():
         help="Port for HTTP/SSE transport (default: 8746)",
     )
     args = parser.parse_args()
+
+    LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+    if args.host not in LOOPBACK_HOSTS:
+        parser.error(
+            f"Binding to non-loopback host '{args.host}' is prohibited for security. "
+            "ida-auto-mcp tools control operating system processes and database files, "
+            "and unauthenticated remote access is not supported. Use 127.0.0.1 or localhost."
+        )
 
     if args.transport == "stdio":
         mcp.run("stdio")
